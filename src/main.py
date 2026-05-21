@@ -18,7 +18,7 @@ os.makedirs(os.path.join(BASE_DIR, "templates"), exist_ok=True)
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
-
+ 
 MODEL_PT = 'yolov8n.pt'
 model = YOLO(MODEL_PT)
 
