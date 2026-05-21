@@ -3,6 +3,7 @@ import threading
 import time
 import json
 import asyncio
+import traceback
 import os
 from ultralytics import YOLO
 from fastapi import FastAPI, WebSocket, Request
@@ -10,19 +11,40 @@ from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+# ┌──────────────────────────────────────────────────────────┐
+# │ CONFIGURATIE & OPTIMALISATIE                             │
+# └──────────────────────────────────────────────────────────┘
+MODEL_PT = 'yolov8n.pt'
+MODEL_NCNN = 'yolov8n_ncnn_model'
+img_size = 320  # Cruciaal voor snelheid op Pi 4
+CONF_THRESH = 0.45
+
+# Multi-core CV2 optimalisatie
+cv2.setNumThreads(4)
+
 app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Zorg dat de mappen bestaan
 os.makedirs(os.path.join(BASE_DIR, "static"), exist_ok=True)
 os.makedirs(os.path.join(BASE_DIR, "templates"), exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
+# ┌──────────────────────────────────────────────────────────┐
+# │ MODEL EXPORT LOGICA                                      │
+# └──────────────────────────────────────────────────────────┘
+if not os.path.exists(MODEL_NCNN):
+    print(f"[*] Bezig met converteren van {MODEL_PT} naar NCNN (FP16)...")
+    temp_model = YOLO(MODEL_PT)
+    # half=True voorkomt 'random shit' detecties (FP16 ipv INT8)
+    temp_model.export(format="ncnn", imgsz=img_size, half=True)
+    print("[+] Export voltooid!")
 
-MODEL_PT = 'yolov8n.pt'
-model = YOLO(MODEL_PT)
+model = YOLO(MODEL_NCNN, task="detect")
 
+# Global variabelen
 raw_frame = None
 output_frame = None
 latest_detections = []
@@ -31,6 +53,9 @@ lock = threading.Lock()
 frame_ready = threading.Event()
 output_ready = threading.Event()
 
+# ┌──────────────────────────────────────────────────────────┐
+# │ HULPFUNCTIES                                             │
+# └──────────────────────────────────────────────────────────┘
 REFERENCE_HEIGHTS = {"person": 1.75, "boat": 2.5, "bottle": 0.25, "default": 1.0}
 FOCAL_LENGTH_KM = 280
 
@@ -39,14 +64,17 @@ def estimate_distance(class_name, pixel_height):
     if pixel_height < 5: return 0
     return round((real_height * FOCAL_LENGTH_KM) / pixel_height, 1)
 
+# ┌──────────────────────────────────────────────────────────┐
+# │ THREADS: CAMERA & DETECTIE                               │
+# └──────────────────────────────────────────────────────────┘
 def grab_frames():
     global raw_frame
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(0) # Probeer 0 of 1
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    
+
     while True:
         success, frame = cap.read()
         if success:
@@ -60,17 +88,17 @@ def detect_objects():
     global output_frame, latest_detections, current_fps
     fps_timer = time.time()
     frame_count = 0
-    
+
     while True:
         frame_ready.wait()
         frame_ready.clear()
-        
+
         with lock:
             if raw_frame is None: continue
             frame = raw_frame.copy()
-            
-   
-        results = model.predict(source=frame, imgsz=640, conf=0.45, verbose=False, device='cpu')
+
+        results = model.predict(source=frame, imgsz=img_size, conf=CONF_THRESH, 
+                                half=True, verbose=False, device='cpu')
         
         this_frame_dets = []
         for r in results:
@@ -80,7 +108,8 @@ def detect_objects():
                 cls_id = int(box.cls[0])
                 label = model.names[cls_id]
                 dist = estimate_distance(label, (y2 - y1))
-                
+
+                # Positie bepalen op basis van de breedte van het scherm (640px)
                 x_center = (x1 + x2) / 2
                 if x_center < 640 / 3:
                     positie = "Bakboord"
@@ -88,24 +117,27 @@ def detect_objects():
                     positie = "Stuurboord"
                 else:
                     positie = "Vooruit"
-                    
+
+                # Tekenen op frame
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(frame, f"{label} {dist}m {positie}", (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                 
                 this_frame_dets.append({"label": label, "distance": dist, "conf": round(conf, 2), "position": positie})
-                
+
+        # FPS Stats
         frame_count += 1
         if time.time() - fps_timer >= 1.0:
             current_fps = frame_count / (time.time() - fps_timer)
             frame_count = 0
             fps_timer = time.time()
-            
+
         with lock:
             output_frame = frame
             latest_detections = this_frame_dets
         output_ready.set()
 
+# routes
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
@@ -130,7 +162,7 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             await websocket.send_json({
                 "fps": round(current_fps, 1),
-                "model": MODEL_PT,
+                "model": MODEL_NCNN,
                 "detections": latest_detections
             })
             await asyncio.sleep(0.3)
