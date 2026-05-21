@@ -18,7 +18,7 @@ os.makedirs(os.path.join(BASE_DIR, "templates"), exist_ok=True)
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
- 
+ # is voor pr
 MODEL_PT = 'yolov8n.pt'
 model = YOLO(MODEL_PT)
 
@@ -35,8 +35,10 @@ def estimate_distance(class_name, pixel_height):
 
 
 def generate_frames():
+
     global latest_detections, current_fps
     cap = cv2.VideoCapture(0)
+
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
@@ -46,7 +48,7 @@ def generate_frames():
     while True:
         success, frame = cap.read()
         if not success:
-            time.sleep(0.01)
+            time.sleep(0.02)
             continue
             
        
